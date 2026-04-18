@@ -7,25 +7,20 @@ service DFSService {
     // Add your service calls here
 
     // 1. REQUIRED (Parts 1 & 2): A method to store files on the server
-  rpc Store(stream StoreRequest) {
-    returns (StoreReply);
-  }
+  rpc Store(stream StoreRequest) returns (StoreReply);
+
     // 2. REQUIRED (Parts 1 & 2): A method to fetch files from the server
-  rpc Fetch(FileRequest){
-    returns (stream FileChunk);
-  }
+  rpc Fetch(FileRequest) returns (stream FileChunk);
+
     // 3. REQUIRED (Parts 1 & 2): A method to delete files from the server
-  rpc Delete(FileRequest){
-    returns (DeleteReply);
-  }
+  rpc Delete(FileRequest) returns (DeleteReply);
+  
     // 4. REQUIRED (Parts 1 & 2): A method to list all files on the server
-  rpc List(ListRequest){
-    returns (ListReply);
-  }
+  rpc List(ListRequest) returns (ListReply);
+  
     // 5. REQUIRED (Parts 1 & 2): A method to get the status of a file on the server
-  rpc Stat(FileRequest){
-    returns (FileStatus);
-  }
+  rpc Stat(FileRequest) returns (FileStatus);
+
     // 7. Any other methods you deem necessary to complete the tasks of this assignment
 
 }
@@ -33,7 +28,7 @@ service DFSService {
 // Add your message types here
 
   message FileRequest{
-    string fileName = 1;
+    string filename = 1;
   }
 
   message ListRequest{}
@@ -43,7 +38,7 @@ service DFSService {
   }
 
   message FileMetaData{
-    string fileName = 1;
+    string filename = 1;
     uint64 size = 2;
     int64 mtime = 3;
   }
@@ -68,7 +63,7 @@ service DFSService {
   }
 
   message FileStatus{
-    string fileName = 1;
+    string filename = 1;
     uint64 size = 2;
     int64 mtime = 3;
   }

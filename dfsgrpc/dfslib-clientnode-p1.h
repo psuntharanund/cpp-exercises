@@ -91,7 +91,6 @@ public:
         //
         // Add your additional declarations here
         private:
-            std::unique_ptr<DFSService::Stub> service_stub;
         //
 
 };

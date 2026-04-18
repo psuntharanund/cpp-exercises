@@ -51,7 +51,6 @@ using dfs_service::DeleteReply;
 
 
 DFSClientNodeP1::DFSClientNodeP1() : DFSClientNode() {
-    this->service_stub = DFSService::NewStub(this->GetChannel());
 }
 
 DFSClientNodeP1::~DFSClientNodeP1() noexcept {}
@@ -75,6 +74,70 @@ StatusCode DFSClientNodeP1::Store(const std::string &filename) {
     // StatusCode::NOT_FOUND - if the file cannot be found on the client
     // StatusCode::CANCELLED otherwise
     //
+
+    std::string fullPath = this->WrapPath(filename);
+
+    struct stat st;
+    if (stat(fullPath.c_str(), &st) != 0){
+        return StatusCode::NOT_FOUND;
+    }
+
+    std::ifstream ifs(fullPath, std::ios::binary);
+    if (!ifs.is_open()){
+        return StatusCode::NOT_FOUND;
+    }
+
+    ClientContext ctx;
+    ctx.set_deadline(
+            std::chrono::system_clock::now() + std::chrono::milliseconds(this->deadline_timeout)
+            );
+    
+
+    StoreReply reply;
+    std::unique_ptr<ClientWriter<StoreRequest>> writer(this->service_stub->Store(&ctx, &reply));
+
+    StoreRequest meta_request;
+    FileMetaData* meta = meta_request.mutable_meta();
+    meta->set_filename(filename);
+    meta->set_size(static_cast<uint64_t>(st.st_size));
+    meta->set_mtime(static_cast<int64_t>(st.st_mtime));
+
+    if (!writer->Write(meta_request)){
+        ifs.close();
+        writer->WritesDone();
+        Status status = writer->Finish();
+        return status.error_code();
+    }
+
+    char buf[2048];
+    while (ifs.good()){
+        ifs.read(buf, sizeof(buf));
+        std::streamsize sent = ifs.gcount();
+        if (sent > 0){
+            StoreRequest chunk_request;
+            chunk_request.set_data(buf, static_cast<size_t>(sent));
+            if (!writer->Write(chunk_request)){
+                ifs.close();
+                writer->WritesDone();
+                Status status = writer->Finish();
+                return status.error_code();
+            }
+        }
+    }
+
+    ifs.close();
+    writer->WritesDone();
+    Status status = writer->Finish();
+
+    if (status.ok()){
+        return StatusCode::OK;
+    }
+
+    if (status.error_code() == StatusCode::DEADLINE_EXCEEDED){
+        return StatusCode::DEADLINE_EXCEEDED;
+    }
+
+    return StatusCode::CANCELLED;
 }
 
 
@@ -98,7 +161,50 @@ StatusCode DFSClientNodeP1::Fetch(const std::string &filename) {
     // StatusCode::NOT_FOUND - if the file cannot be found on the server
     // StatusCode::CANCELLED otherwise
     //
-    //
+    
+    ClientContext ctx;
+    ctx.set_deadline(
+            std::chrono::system_clock::now() + std::chrono::milliseconds(this->deadline_timeout)
+            );
+    
+
+    FileRequest request;
+    request.set_filename(filename);
+
+    std::string fullPath = this->WrapPath(filename);
+    std::ofstream ofs(fullPath, std::ios::binary | std::ios::trunc);
+    if (!ofs.is_open()){
+        return StatusCode::CANCELLED;
+    }
+
+    std::unique_ptr<ClientReader<FileChunk>> reader(this->service_stub->Fetch(&ctx, request));
+
+    FileChunk chunk;
+    while (reader->Read(&chunk)){
+        ofs.write(chunk.data().data(), chunk.data().size());
+        if (!ofs.good()){
+            ofs.close();
+            Status status = reader->Finish();
+            return StatusCode::CANCELLED;
+        }
+    }
+
+    ofs.close();
+    Status status = reader->Finish();
+
+    if (status.ok()){
+        return StatusCode::OK;
+    }
+
+    if (status.error_code() == StatusCode::NOT_FOUND){
+        return StatusCode::NOT_FOUND;
+    }
+
+    if (status.error_code() == StatusCode::DEADLINE_EXCEEDED){
+        return StatusCode::DEADLINE_EXCEEDED;
+    }
+
+    return StatusCode::CANCELLED;
 }
 
 StatusCode DFSClientNodeP1::Delete(const std::string& filename) {
@@ -116,7 +222,32 @@ StatusCode DFSClientNodeP1::Delete(const std::string& filename) {
     // StatusCode::NOT_FOUND - if the file cannot be found on the server
     // StatusCode::CANCELLED otherwise
     //
+    
+    ClientContext ctx;
+    ctx.set_deadline(
+            std::chrono::system_clock::now() + std::chrono::milliseconds(this->deadline_timeout)
+            );
+    
 
+    FileRequest request;
+    request.set_filename(filename);
+
+    DeleteReply reply;
+    Status status = this->service_stub->Delete(&ctx, request, &reply);
+
+    if (status.ok()){
+        return StatusCode::OK;
+    }
+
+    if (status.error_code() == StatusCode::NOT_FOUND){
+        return StatusCode::NOT_FOUND;
+    }
+
+    if (status.error_code() == StatusCode::DEADLINE_EXCEEDED){
+        return StatusCode::DEADLINE_EXCEEDED;
+    }
+
+    return StatusCode::CANCELLED;
 }
 
 StatusCode DFSClientNodeP1::List(std::map<std::string,int>* file_map, bool display) {
@@ -140,6 +271,34 @@ StatusCode DFSClientNodeP1::List(std::map<std::string,int>* file_map, bool displ
     // StatusCode::CANCELLED otherwise
     //
     //
+
+    ClientContext ctx;
+    ctx.set_deadline(
+            std::chrono::system_clock::now() + std::chrono::milliseconds(this->deadline_timeout)
+            );
+    
+
+    ListRequest request;
+    ListReply reply;
+
+    Status status = this->service_stub->List(&ctx, request, &reply);
+
+    if (!status.ok()){
+        if (status.error_code() == StatusCode::DEADLINE_EXCEEDED){
+            return StatusCode::DEADLINE_EXCEEDED;
+        }
+        return StatusCode::CANCELLED;
+    }
+
+    file_map->clear();
+    for (const auto& file : reply.files()){
+        (*file_map)[file.filename()] = static_cast<int>(file.mtime());
+        if (display){
+            std::cout << file.filename() << " " << file.mtime() << std::endl;
+        }
+    }
+
+    return StatusCode::OK;
 }
 
 StatusCode DFSClientNodeP1::Stat(const std::string &filename, void* file_status) {
@@ -166,6 +325,35 @@ StatusCode DFSClientNodeP1::Stat(const std::string &filename, void* file_status)
     // StatusCode::CANCELLED otherwise
     //
     //
+    
+    ClientContext ctx;
+    ctx.set_deadline(
+            std::chrono::system_clock::now() + std::chrono::milliseconds(this->deadline_timeout)
+            );
+    
+
+    FileRequest request;
+    request.set_filename(filename);
+
+    FileStatus response;
+    Status status = this->service_stub->Stat(&ctx, request, &response);
+
+    if (!status.ok()){
+        if (status.error_code() == StatusCode::NOT_FOUND){
+            return StatusCode::NOT_FOUND;
+        }
+        if (status.error_code() == StatusCode::DEADLINE_EXCEEDED){
+            return StatusCode::DEADLINE_EXCEEDED;
+        }
+
+        return StatusCode::CANCELLED;
+    }
+
+    if (file_status != nullptr){
+        *static_cast<FileStatus*>(file_status) = response;
+    }
+
+    return StatusCode::OK;
 }
 
 //

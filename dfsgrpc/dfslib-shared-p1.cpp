@@ -24,7 +24,7 @@ dfs_log_level_e DFS_LOG_LEVEL = LL_ERROR;
 // be compilable.
 //
 
-static void SetDeadLine(grpc::ClientContext* ctx){
+void SetDeadLine(grpc::ClientContext* ctx){
     ctx->set_deadline(
             std::chrono::system_clock::now() + std::chrono::milliseconds(DFS_RESET_TIMEOUT)
             );

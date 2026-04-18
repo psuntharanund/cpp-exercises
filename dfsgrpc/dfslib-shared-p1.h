@@ -20,6 +20,7 @@
 // Add your additional code here
 //
 
+void SetDeadLine(grpc::ClientContext* ctx);
 
 #endif
 
