@@ -7,26 +7,87 @@ service DFSService {
     // Add your service calls here
 
     // 1. REQUIRED (Parts 1 & 2): A method to store files on the server
+  rpc Store(stream StoreRequest) returns (StoreReply);
 
     // 2. REQUIRED (Parts 1 & 2): A method to fetch files from the server
+  rpc Fetch(FileRequest) returns (stream FileChunk);
 
-    // 3. REQUIRED (Parts 1 & 2): A method to list all files on the server
+    // 3. REQUIRED (Parts 1 & 2): A method to delete files from the server
+  rpc Delete(FileRequest) returns (DeleteReply);
+  
+    // 4. REQUIRED (Parts 1 & 2): A method to list all files on the server
+  rpc List(ListRequest) returns (ListReply);
+  
+    // 5. REQUIRED (Parts 1 & 2): A method to get the status of a file on the server
+  rpc Stat(FileRequest) returns (FileStatus);
 
-    // 4. REQUIRED (Parts 1 & 2): A method to get the status of a file on the server
+    // 7. Any other methods you deem necessary to complete the tasks of this assignment
+  
+    //This method will create the lock as the structure is one writer per file
+  rpc RequestWriteLock(LockRequest) returns (LockReply);
 
-    // 5. REQUIRED (Part 2 only): A method to request a write lock from the server
-
-    // 6. REQUIRED (Part 2 only): A method named CallbackList to handle asynchronous file listing requests
-    //                            from a client. This method should return a listing of files along with their
-    //                            attribute information. The expected attribute information should include name,
-    //                            size, and modified time.
-
-    // 7. REQUIRED (Part 2 only): A method to delete a file from the server
-
-    // 8. Any other methods you deem necessary to complete the tasks of this assignment
-
+    //This method will create the callback
+  rpc CallbackList(CallbackRequest) returns (CallbackReply);
 
 }
 
 // Add your message types here
 
+  message FileRequest{
+    string filename = 1;
+  }
+
+  message ListRequest{}
+
+  message FileChunk{
+    bytes data = 1;
+  }
+
+  message FileMetaData{
+    string filename = 1;
+    uint64 size = 2;
+    int64 mtime = 3;
+  }
+
+  message StoreRequest{
+    oneof payload{
+      FileMetaData meta = 1;
+    b   bytes data = 2;
+    }
+  }
+
+  message StoreReply{
+    FileMetaData status = 1;
+  }
+
+  message DeleteReply{
+    bool deleted = 1;
+  }
+
+  message ListReply{
+    repeated FileMetaData files = 1;
+  }
+
+  message FileStatus{
+    string filename = 1;
+    uint64 size = 2;
+    int64 mtime = 3;
+    uint32 crc = 4;
+  }
+
+  message LockRequest{
+    string filename = 1;
+    string clientID = 2;
+  }
+
+  message LockReply{
+    bool accepted = 1;
+  }
+
+  message CallbackRequest{
+    string clientID = 1;
+  }
+
+  message CallbackReply{
+    repeated FileStatus files = 1;
+  }

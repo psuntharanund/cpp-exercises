@@ -30,6 +30,16 @@ using grpc::StatusCode;
 using grpc::ClientWriter;
 using grpc::ClientReader;
 using grpc::ClientContext;
+using dfs_service::DFSService;
+using dfs_service::FileRequest;
+using dfs_service::ListRequest;
+using dfs_service::ListReply;
+using dfs_service::FileChunk;
+using dfs_service::FileMetaData;
+using dfs_service::FileStatus;
+using dfs_service::StoreRequest;
+using dfs_service::StoreReply;
+using dfs_service::DeleteReply;
 
 extern dfs_log_level_e DFS_LOG_LEVEL;
 
@@ -41,7 +51,7 @@ extern dfs_log_level_e DFS_LOG_LEVEL;
 // a file request and a listing of files from the server.
 //
 using FileRequestType = FileRequest;
-using FileListResponseType = FileList;
+using FileListResponseType = ListReply;
 
 DFSClientNodeP2::DFSClientNodeP2() : DFSClientNode() {}
 DFSClientNodeP2::~DFSClientNodeP2() {}
@@ -65,7 +75,31 @@ grpc::StatusCode DFSClientNodeP2::RequestWriteAccess(const std::string &filename
     // StatusCode::CANCELLED otherwise
     //
     //
+    
+    ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(this->deadline_timeout));
 
+    FileRequest request;
+    request.set_filename(filename);
+    request.set_clientID(this->clientID);
+
+    LockReply reply;
+
+    Status status = this->service_stub->RequestWriteAccess(&ctx, request, &reply);
+
+    if (status.ok()){
+        return StatusCode::OK;
+    }
+
+    if (status.error_code() == StatusCode::RESOURCE_EXHAUSTED){
+        return StatusCode::RESOURCE_EXHAUSTED;
+    }
+
+    if (status.error_code() == StatusCode::DEADLINE_EXCEEDED){
+        return StatusCode::DEADLINE_EXCEEDED;
+    }
+
+    return StatusCode::CANCELLED;
 }
 
 grpc::StatusCode DFSClientNodeP2::Store(const std::string &filename) {
@@ -93,7 +127,75 @@ grpc::StatusCode DFSClientNodeP2::Store(const std::string &filename) {
     // StatusCode::RESOURCE_EXHAUSTED - if a write lock cannot be obtained
     // StatusCode::CANCELLED otherwise
     //
-    //
+   
+    auto lock = RequestWriteAccess(filename);
+    if (lock != StatusCode::OK){
+        return lock;
+    }
+
+    std::string fullPath = this->WrapPath(filename);
+
+    struct stat st;
+    if (stat(fullPath.c_str(), &st) != 0){
+        return StatusCode::NOT_FOUND;
+    }
+
+    std::ifstream ifs(fullPath, std::ios::binary);
+    if (!ifs.is_open()){
+        return StatusCode::NOT_FOUND;
+    }
+
+    ClientContext ctx;
+    ctx.set_deadline(
+            std::chrono::system_clock::now() + std::chrono::milliseconds(this->deadline_timeout)
+            );
+    
+
+    StoreReply reply;
+    std::unique_ptr<ClientWriter<StoreRequest>> writer(this->service_stub->Store(&ctx, &reply));
+
+    StoreRequest meta_request;
+    FileMetaData* meta = meta_request.mutable_meta();
+    meta->set_filename(filename);
+    meta->set_size(static_cast<uint64_t>(st.st_size));
+    meta->set_mtime(static_cast<int64_t>(st.st_mtime));
+
+    if (!writer->Write(meta_request)){
+        ifs.close();
+        writer->WritesDone();
+        Status status = writer->Finish();
+        return status.error_code();
+    }
+
+    char buf[2048];
+    while (ifs.good()){
+        ifs.read(buf, sizeof(buf));
+        std::streamsize sent = ifs.gcount();
+        if (sent > 0){
+            StoreRequest chunk_request;
+            chunk_request.set_data(buf, static_cast<size_t>(sent));
+            if (!writer->Write(chunk_request)){
+                ifs.close();
+                writer->WritesDone();
+                Status status = writer->Finish();
+                return status.error_code();
+            }
+        }
+    }
+
+    ifs.close();
+    writer->WritesDone();
+    Status status = writer->Finish();
+
+    if (status.ok()){
+        return StatusCode::OK;
+    }
+
+    if (status.error_code() == StatusCode::DEADLINE_EXCEEDED){
+        return StatusCode::DEADLINE_EXCEEDED;
+    }
+
+    return StatusCode::CANCELLED;
 
 }
 
@@ -121,6 +223,51 @@ grpc::StatusCode DFSClientNodeP2::Fetch(const std::string &filename) {
     //
     // Hint: You may want to match the mtime on local files to the server's mtime
     //
+
+    ClientContext ctx;
+    ctx.set_deadline(
+            std::chrono::system_clock::now() + std::chrono::milliseconds(this->deadline_timeout)
+            );
+    
+
+    FileRequest request;
+    request.set_filename(filename);
+
+    std::string fullPath = this->WrapPath(filename);
+    std::ofstream ofs(fullPath, std::ios::binary | std::ios::trunc);
+    if (!ofs.is_open()){
+        return StatusCode::CANCELLED;
+    }
+
+    std::unique_ptr<ClientReader<FileChunk>> reader(this->service_stub->Fetch(&ctx, request));
+
+    FileChunk chunk;
+    while (reader->Read(&chunk)){
+        ofs.write(chunk.data().data(), chunk.data().size());
+        if (!ofs.good()){
+            ofs.close();
+            Status status = reader->Finish();
+            return StatusCode::CANCELLED;
+        }
+    }
+
+    ofs.close();
+    Status status = reader->Finish();
+
+    if (status.ok()){
+        return StatusCode::OK;
+    }
+
+    if (status.error_code() == StatusCode::NOT_FOUND){
+        return StatusCode::NOT_FOUND;
+    }
+
+    if (status.error_code() == StatusCode::DEADLINE_EXCEEDED){
+        return StatusCode::DEADLINE_EXCEEDED;
+    }
+
+    return StatusCode::CANCELLED;
+    
 }
 
 grpc::StatusCode DFSClientNodeP2::Delete(const std::string &filename) {
@@ -143,7 +290,37 @@ grpc::StatusCode DFSClientNodeP2::Delete(const std::string &filename) {
     // StatusCode::RESOURCE_EXHAUSTED - if a write lock cannot be obtained
     // StatusCode::CANCELLED otherwise
     //
-    //
+   
+    auto lock = RequestWriteAccess(filename);
+    if (lock != StatusCode::OK){
+        return lock;
+    }
+
+    ClientContext ctx;
+    ctx.set_deadline(
+            std::chrono::system_clock::now() + std::chrono::milliseconds(this->deadline_timeout)
+            );
+    
+
+    FileRequest request;
+    request.set_filename(filename);
+
+    DeleteReply reply;
+    Status status = this->service_stub->Delete(&ctx, request, &reply);
+
+    if (status.ok()){
+        return StatusCode::OK;
+    }
+
+    if (status.error_code() == StatusCode::NOT_FOUND){
+        return StatusCode::NOT_FOUND;
+    }
+
+    if (status.error_code() == StatusCode::DEADLINE_EXCEEDED){
+        return StatusCode::DEADLINE_EXCEEDED;
+    }
+
+    return StatusCode::CANCELLED;
 
 }
 
@@ -164,7 +341,35 @@ grpc::StatusCode DFSClientNodeP2::List(std::map<std::string,int>* file_map, bool
     // StatusCode::DEADLINE_EXCEEDED - if the deadline timeout occurs
     // StatusCode::CANCELLED otherwise
     //
-    //
+
+    ClientContext ctx;
+    ctx.set_deadline(
+            std::chrono::system_clock::now() + std::chrono::milliseconds(this->deadline_timeout)
+            );
+    
+
+    ListRequest request;
+    ListReply reply;
+
+    Status status = this->service_stub->List(&ctx, request, &reply);
+
+    if (!status.ok()){
+        if (status.error_code() == StatusCode::DEADLINE_EXCEEDED){
+            return StatusCode::DEADLINE_EXCEEDED;
+        }
+        return StatusCode::CANCELLED;
+    }
+
+    file_map->clear();
+    for (const auto& file : reply.files()){
+        (*file_map)[file.filename()] = static_cast<int>(file.mtime());
+        if (display){
+            std::cout << file.filename() << " " << file.mtime() << std::endl;
+        }
+    }
+
+    return StatusCode::OK;
+
 }
 
 grpc::StatusCode DFSClientNodeP2::Stat(const std::string &filename, void* file_status) {
@@ -185,7 +390,36 @@ grpc::StatusCode DFSClientNodeP2::Stat(const std::string &filename, void* file_s
     // StatusCode::NOT_FOUND - if the file cannot be found on the server
     // StatusCode::CANCELLED otherwise
     //
-    //
+    
+    ClientContext ctx;
+    ctx.set_deadline(
+            std::chrono::system_clock::now() + std::chrono::milliseconds(this->deadline_timeout)
+            );
+    
+
+    FileRequest request;
+    request.set_filename(filename);
+
+    FileStatus response;
+    Status status = this->service_stub->Stat(&ctx, request, &response);
+
+    if (!status.ok()){
+        if (status.error_code() == StatusCode::NOT_FOUND){
+            return StatusCode::NOT_FOUND;
+        }
+        if (status.error_code() == StatusCode::DEADLINE_EXCEEDED){
+            return StatusCode::DEADLINE_EXCEEDED;
+        }
+
+        return StatusCode::CANCELLED;
+    }
+
+    if (file_status != nullptr){
+        *static_cast<FileStatus*>(file_status) = response;
+    }
+
+    return StatusCode::OK;
+    
 }
 
 void DFSClientNodeP2::InotifyWatcherCallback(std::function<void()> callback) {
