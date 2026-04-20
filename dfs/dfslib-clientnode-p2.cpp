@@ -443,7 +443,7 @@ void DFSClientNodeP2::InotifyWatcherCallback(std::function<void()> callback) {
     // the async thread when a file event has been signaled?
     //
 
-
+    std::lock_guard<std::mutex> guard(this->sync_m);
     callback();
 
 }
@@ -488,6 +488,7 @@ void DFSClientNodeP2::HandleCallbackList() {
             //
             // Consider adding a critical section or RAII style lock here
             //
+            std::lock_guard<std::mutex> guard(this->sync_m);
 
             // The tag is the memory location of the call_data object
             AsyncClientData<FileListResponseType> *call_data = static_cast<AsyncClientData<FileListResponseType> *>(tag);
@@ -515,8 +516,56 @@ void DFSClientNodeP2::HandleCallbackList() {
                 // Send an update to the server?
                 // Do nothing?
                 //
+                
+                const FileListResponseType& server_reply = call_data->reply;
 
+                //build server map
+                std::map<std::string, FileMetaData> server_map;
+                for (const auto& file : server_reply.files()){
+                    server_map[file.filename()] = file;
+                }
 
+                //build local map
+                auto local_map = BuildLocalMap();
+                
+                //reconcile files present on server
+                for (const auto& [filename, server_meta] : server_map){
+                    auto local_it = local_map.find(filename);
+
+                    //if the file is missing locally, get it from the server
+                    if (local_it == local_map.end()){
+                        dfs_log(LL_DEBUG3) << "Missing file locally, fetching from server." << filename;
+                        this->Fetch(filename);
+                        continue;
+                    }
+
+                    const LocalFileInfo& local_info = local_it->seconds;
+
+                    //if file already exists locally, do nothing
+                    if (local_info.crc == server_meta.crc()){
+                        continue;
+                    }
+
+                    //if the contents of files differ from local to server, pick newer mtime file
+                    if (server_meta.mtime() > local_info.mtime){
+                        dfs_log(LL_DEBUG3) << "Server has newer file, fetching. . ." << filename;
+                        this->Fetch(filename);
+                    } else if (server_meta.mtime() < local_info.mtime){
+                        dfs_log(LL_DEBUG3) << "Client has newer file, storing. . ." << filename;
+                        this->Store(filename);
+                    } else{
+                        //mtime equal, but CRC differs do nothing
+                        dfs_log(LL_DEBUG3) << "Equal mtimes, but differing CRC. Doing nothing. . ." << filename;
+                    }
+                }
+
+                //reconcile files present locally but not on server
+                for (const auto& [filename, server_meta] : local_map){
+                    if (server_map.find(filename == server_map.end()){
+                        dfs_log(LL_DEBUG3) << "File does not exist on server, storing. . ." << filename;
+                        this->Store(filename);
+                    }
+                }
 
             } else {
                 dfs_log(LL_ERROR) << "Status was not ok. Will try again in " << DFS_RESET_TIMEOUT << " milliseconds.";
@@ -560,3 +609,33 @@ void DFSClientNodeP2::InitCallbackList() {
 // Add any additional code you need to here
 //
 
+std::map<std::string, DFSClientNodeP2::LocalFileInfo> DFSClientNodeP2::BuildLocalMap(){
+    std::map<std::string, LocalFileInfo> local_map;
+
+    DIR* directory = opendir(this->WrapPath().c_str());
+    if (!directory){
+        return local_map;
+    }
+
+    struct dirent* entry;
+    while ((entry = readdir(directory)) != nullptr){
+        std::string name = entry->d_name;
+        if (name == "." || name == ".."){
+            continue;
+        }
+
+        std::string fullPath = this->WrapPath(name);
+        struct stat st;
+        if (stat(fullPath.c_str(), &st) == 0 && S_ISREG(st.st_mode)){
+            LocalFileInfo info;
+            info.filename = name;
+            info.size = static_cast<std::uint64_t>(st.st_size);
+            info.mtime = static_cast<std::int64_t>(st.st_mtime);
+            info.crc = dfs_file_checksum(fullPath, &this->crc_table);
+            local_map[name] = info;
+        }
+    }
+
+    closedir(directory);
+    return local_map;
+}

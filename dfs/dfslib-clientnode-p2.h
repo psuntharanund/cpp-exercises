@@ -15,6 +15,19 @@
 
 class DFSClientNodeP2 : public DFSClientNode {
 
+    private:
+        std::mutex sync_m;
+        
+        struct LocalFileInfo{
+            std::string filename;
+            std::uint32_t crc;
+            std::int64_t mtime;
+            std::uint64_t size;
+        };
+
+        std::map<std::string, LocalFileInfo> BuildLocalMap();
+        std::uint32_t ComputeLocalCRC(const std::string& filename);
+
 public:
 
     //
