@@ -1,3 +1,4 @@
+#include <condition_variable>
 #include <map>
 #include <mutex>
 #include <shared_mutex>
@@ -92,6 +93,11 @@ private:
     /** The vector of queued tags used to manage asynchronous requests **/
     std::vector<QueueRequest<FileRequestType, FileListResponseType>> queued_tags;
 
+    std::mutex lock_m;
+    std::map<std::string,std::string> file_locks;
+    std::mutex change_m;
+    std::condition_variable change_cv;
+    std::uint64_t change_ctr = 0;
 
     /**
      * Prepend the mount path to the filename.
@@ -124,6 +130,34 @@ public:
 
     void Run() {
         this->runner.Run();
+    }
+    
+    void FillServerFileList(ListReply* reply){
+        DIR* directory = opendir(this->WrapPath.c_str());
+        if (!directory){
+            return;
+        }
+
+        struct dirent* entry;
+        while ((entry = readdir(directory)) != nullptr ){
+            std::string name = entry->d_name;
+            if (name == "." || name == ".."){
+                continue;
+            }
+
+            std::string fullPath = WrapPath(name);
+            struct stat st;
+
+            if (stat(fullPath.c_str(), &st) == 0 && S_ISREG(st.st_mode)){
+                FileMetaData* file = reply->add_files();
+                file->set_filename(name);
+                file->set_size(static_cast<uint64_t>(st.st_size));
+                file->set_mtime(static_cast<int64_t>(st.st_mtime));
+                file->set_crc(dfs_file_checksum(fullPath, &this->crc_table));
+            }
+        }
+
+        closedir(directory);
     }
 
     /**
@@ -175,6 +209,24 @@ public:
         // The client should receive a list of files or modifications that represent the changes this service
         // is aware of. The client will then need to make the appropriate calls based on those changes.
         //
+        
+        std::uint64_t processing;
+        {
+            std::lock_guard<std::mutex> guard(change_m);
+            processing = change_ctr;
+        }
+
+        std::unique_lock<std::mutex> lock(change_m);
+        change_cv.wait(lock, [&] {
+                return context->IsCancelled() || change_ctr != processing;
+                });
+        lock.unlock();
+
+        if (ctx->IsCancelled()){
+            return;
+        }
+
+        FillServerFileList(response);
 
     }
 
@@ -216,6 +268,18 @@ public:
 
             }
         }
+    }
+
+    void CountChange(){
+        std::lock_guard<std::mutex> guard(change_m);
+        ++change_ctr;
+        change_cv.notify_all();
+    }
+    
+    bool HasWriteLock(const std::string& filename, const std::string& clientID){
+        std::lock_guard<std::mutex> guard(lock_m);
+        auto it = file_locks.find(filename);
+        return it != file_locks.end() && it->second == clientID;
     }
 
     //
@@ -262,6 +326,11 @@ public:
             if (request.has_meta()){
                 filename = request.meta().filename();
                 fullPath = WrapPath(filename);
+                
+                opened = HasWriteLock(filename, fullPath);
+                if (!opened){
+                    return StatusCode::RESOURCE_EXHAUSTED;
+                }
 
                 ofs.open(fullPath, std::ios::binary | std::ios::trunc);
                 if (!ofs.is_open()){
@@ -296,7 +365,8 @@ public:
 
         std::lock_guard<std::mutex> guard(lock_m);
         file_locks.erase(filename);
-
+        
+        CountChange();
         return Status::OK;
     }
 
@@ -349,37 +419,16 @@ public:
         reply->set_deleted(true);
 
         std::lock_guard<std::mutex> guard(lock_m);
-        file_locks.erase(filename);
-
+        file_locks.erase(request->filename);
+        
+        CountChange()
         return Status::OK;
     }
     
     Status List(ServerContext* ctx,
                 const ListRequest* request,
                 ListReply* reply) override{
-        DIR* directory = opendir(this->mount_path.c_str());
-        if (!directory){
-            return Status(StatusCode::CANCELLED, "Unable to open mount directory.");
-        }
-
-        struct dirent* entry;
-        while ((entry = readdir(directory)) != nullptr){
-            std::string name = entry->d_name;
-            if (name == "." || name == ".."){
-                continue;
-            }
-
-            std::string fullPath = WrapPath(name);
-            struct stat st;
-            if (stat(fullPath.c_str(), &st) == 0 && S_ISREG(st.st_mode)){
-                FileMetaData* file = reply->add_files();
-                file->set_filename(name);
-                file->set_size(static_cast<uint64_t>(st.st_size));
-                file->set_mtime(static_cast<int64_t>(st.st_mtime));
-            }
-        }
-
-        closedir(directory);
+        FillServerFileList(reply);
         return Status::OK;
     }
 
@@ -399,7 +448,7 @@ public:
         
         return Status::OK;
     }
-
+    
 };
 
 //
