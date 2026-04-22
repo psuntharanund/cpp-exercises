@@ -38,6 +38,10 @@ using dfs_service::FileStatus;
 using dfs_service::StoreRequest;
 using dfs_service::StoreReply;
 using dfs_service::DeleteReply;
+using dfs_service::LockRequest;
+using dfs_service::LockReply;
+using dfs_service::CallbackRequest;
+using dfs_service::CallbackReply;
 
 //
 // STUDENT INSTRUCTION:
@@ -77,7 +81,182 @@ extern dfs_log_level_e DFS_LOG_LEVEL;
 //
 class DFSServiceImpl final :
     public DFSService::WithAsyncMethod_CallbackList<DFSService::Service>,
-        public DFSCallDataManager<FileRequestType , FileListResponseType> {
+    public DFSCallDataManager<FileRequestType , FileListResponseType>
+
+    Status RequestWriteAccess(ServerContext* ctx, 
+                            const FileRequest* request, 
+                            LockReply* reply) override{
+        std::lock_guard<std::mutex> guard(lock_m);
+        
+        std::string file = request->filename();
+        std::string client = request->ClientId();
+
+        auto it = file_locks.find(file);
+
+        if (it == file_locks.end() || it->second == client){
+            file_locks[file] = client;
+            reply->set_granted(true);
+            return Status::OK;
+        }
+
+        return Status(StatusCode::RESOURCE_EXHAUSTED, "Lock is on.");
+
+    }
+
+    Status RequestWriteLock(ServerContext* ctx,
+                        const LockRequest* request,
+                        LockReply* reply) override{
+        std::lock_guard<std::mutex> guard(lock_m);
+        std::string file request->filename();
+        std::string client = request->clientid();
+
+        auto it = file_locks.find(file);
+
+        if (it == file_locks.end() || it->second == client){
+            file_locks[file] = client;
+            reply->set_accepted(true);
+            return Status::OK;
+        }
+
+        reply->set_accepted(false);
+        return Status(StatusCode::RESOURCE_EXHAUSTED, "Lock held by another client.");
+    }
+
+    Status Store(ServerContext* ctx, 
+                ServerReader<StoreRequest>* reader, 
+                StoreReply* reply) override{
+        StoreRequest request;
+        std::ofstream ofs;
+        std::string filename;
+        std::string fullPath;
+        std::string clientID;
+        bool opened = false;
+
+        while (reader->Read(&request)){
+            if (request.has_meta()){
+                filename = request.meta().filename();
+                clientID = request.meta().clientID();
+                fullPath = WrapPath(filename);
+                
+                if(!HasWriteLock(filename, clientID)){
+                    return Statis(StatusCode::RESOURCE_EXHAUSTED, "Does not have write lock.");
+                }
+
+                ofs.open(fullPath, std::ios::binary | std::ios::trunc);
+                if (!ofs.is_open()){
+                    return Status(StatusCode::CANCELLED, "Unable to open file for writing.");
+                }
+                opened = true;
+            } else if(request.payload_case() == StoreRequest::kData){
+                if (!opened){
+                    return Status(StatusCode::CANCELLED, "Meta data must come in first.");
+                }
+                ofs.write(request.data().data(), request.data().size());
+                if (!ofs.good()){
+                    ofs.close();
+                    return Status(StatusCode::CANCELLED, "Write failed.");
+                }
+            }
+        }
+
+        if (ofs.is_open()){
+            ofs.close();
+        }
+
+        struct stat st;
+        if (filename.empty() || stat(fullPath.c_str(), &st) != 0){
+            return Status(StatusCode::CANCELLED, "Stored file status is unavailable.");
+        }
+
+        FileMetaData* metaData = reply->mutable_status();
+        metaData->set_filename(filename);
+        metaData->set_size(static_cast<uint64_t>(st.st_size));
+        metaData->set_mtime(static_cast<int64_t>(st.st_mtime));
+
+        std::lock_guard<std::mutex> guard(lock_m);
+        file_locks.erase(filename);
+        
+        CountChange();
+        return Status::OK;
+    }
+
+    Status Fetch(ServerContext* ctx,
+                const FileRequest* request,
+                ServerWriter<FileChunk>* writer) override{
+        std::string fullPath = WrapPath(request->filename());
+        
+        struct stat st;
+        if (stat(fullPath.c_str(), &st) != 0){
+            return Status(StatusCode::NOT_FOUND, "File not found.");
+        }
+
+        std::ifstream ifs(fullPath, std::ios::binary);
+        if (!ifs.is_open()){
+            return Status(StatusCode::CANCELLED, "Unable to open file.");
+        }
+
+        char buf[2048];
+        while (ifs.good()){
+            ifs.read(buf, sizeof(buf));
+            std::streamsize sent = ifs.gcount();
+            if (sent > 0){
+                FileChunk chunk;
+                chunk.set_data(buf, static_cast<size_t>(sent));
+                if (!writer->Write(chunk)){
+                    ifs.close();
+                    return Status(StatusCode::CANCELLED, "Stream write has failed.");
+                }
+            }
+        }
+        ifs.close();
+        return Status::OK;
+    }
+
+    Status Delete(ServerContext* ctx,
+                const FileRequest* request,
+                DeleteReply* reply) override{
+        std::string fullPath = WrapPath(request->filename());
+
+        struct stat st;
+        if (stat(fullPath.c_str(), &st) != 0){
+            return Status(StatusCode::NOT_FOUND, "File not found.");
+        }
+
+        if (std::remove(fullPath.c_str()) != 0){
+            return Status(StatusCode::CANCELLED, "Failed to delete file.");
+        }
+
+        reply->set_deleted(true);
+
+        std::lock_guard<std::mutex> guard(lock_m);
+        file_locks.erase(request->filename());
+        
+        CountChange();
+        return Status::OK;
+    }
+    
+    Status List(ServerContext* ctx,
+                const ListRequest* request,
+                ListReply* reply) override{
+        FillServerFileList(reply);
+        return Status::OK;
+    }
+
+    Status Stat(ServerContext* ctx,
+                const FileRequest* request,
+                FileStatus* response) override{
+        std::string fullPath = WrapPath(request->filename());
+
+        struct stat st;
+        if (stat(fullPath.c_str(), &st) != 0){
+            return Status(StatusCode::NOT_FOUND, "File not found.");
+        }
+
+        response->set_filename(request->filename());
+        response->set_size(static_cast<uint64_t>(st.st_size));
+        response->set_mtime(static_cast<int64_t>(st.st_mtime));
+        
+        return Status::OK;
 
 private:
 
@@ -288,163 +467,7 @@ public:
     //
     
     //Add the mutexes
- 
-    Status RequestWriteAccess(ServerContext* ctx, 
-                            const FileRequest* request, 
-                            LockReply* reply) override{
-        std::lock_guard<std::mutex> guard(lock_m);
-        
-        std::string file = request->filename();
-        std::string client = request->clientID();
-
-        auto it = file_locks.find(file);
-
-        if (it == file_locks.end() || it->second == client){
-            file_locks[file] = client;
-            reply->set_granted(true);
-            return Status::OK;
-        }
-
-        return Status(StatusCode::RESOURCE_EXHAUSTED, "Lock is on.");
-
-    }
-    Status Store(ServerContext* ctx, 
-                ServerReader<StoreRequest>* reader, 
-                StoreReply* reply) override{
-        StoreRequest request;
-        std::ofstream ofs;
-        std::string filename;
-        std::string fullPath;
-        std::string clientID;
-        bool opened = false;
-
-        while (reader->Read(&request)){
-            if (request.has_meta()){
-                filename = request.meta().filename();
-                clientID = request.meta().clientID();
-                fullPath = WrapPath(filename);
-                
-                if(!HasWriteLock(filename, clientID)){
-                    return Statis(StatusCode::RESOURCE_EXHAUSTED, "Does not have write lock.");
-                }
-
-                ofs.open(fullPath, std::ios::binary | std::ios::trunc);
-                if (!ofs.is_open()){
-                    return Status(StatusCode::CANCELLED, "Unable to open file for writing.");
-                }
-                opened = true;
-            } else if(request.payload_case() == StoreRequest::kData){
-                if (!opened){
-                    return Status(StatusCode::CANCELLED, "Meta data must come in first.");
-                }
-                ofs.write(request.data().data(), request.data().size());
-                if (!ofs.good()){
-                    ofs.close();
-                    return Status(StatusCode::CANCELLED, "Write failed.");
-                }
-            }
-        }
-
-        if (ofs.is_open()){
-            ofs.close();
-        }
-
-        struct stat st;
-        if (filename.empty() || stat(fullPath.c_str(), &st) != 0){
-            return Status(StatusCode::CANCELLED, "Stored file status is unavailable.");
-        }
-
-        FileMetaData* metaData = reply->mutable_status();
-        metaData->set_filename(filename);
-        metaData->set_size(static_cast<uint64_t>(st.st_size));
-        metaData->set_mtime(static_cast<int64_t>(st.st_mtime));
-
-        std::lock_guard<std::mutex> guard(lock_m);
-        file_locks.erase(filename);
-        
-        CountChange();
-        return Status::OK;
-    }
-
-    Status Fetch(ServerContext* ctx,
-                const FileRequest* request,
-                ServerWriter<FileChunk>* writer) override{
-        std::string fullPath = WrapPath(request->filename());
-        
-        struct stat st;
-        if (stat(fullPath.c_str(), &st) != 0){
-            return Status(StatusCode::NOT_FOUND, "File not found.");
-        }
-
-        std::ifstream ifs(fullPath, std::ios::binary);
-        if (!ifs.is_open()){
-            return Status(StatusCode::CANCELLED, "Unable to open file.");
-        }
-
-        char buf[2048];
-        while (ifs.good()){
-            ifs.read(buf, sizeof(buf));
-            std::streamsize sent = ifs.gcount();
-            if (sent > 0){
-                FileChunk chunk;
-                chunk.set_data(buf, static_cast<size_t>(sent));
-                if (!writer->Write(chunk)){
-                    ifs.close();
-                    return Status(StatusCode::CANCELLED, "Stream write has failed.");
-                }
-            }
-        }
-        ifs.close();
-        return Status::OK;
-    }
-
-    Status Delete(ServerContext* ctx,
-                const FileRequest* request,
-                DeleteReply* reply) override{
-        std::string fullPath = WrapPath(request->filename());
-
-        struct stat st;
-        if (stat(fullPath.c_str(), &st) != 0){
-            return Status(StatusCode::NOT_FOUND, "File not found.");
-        }
-
-        if (std::remove(fullPath.c_str()) != 0){
-            return Status(StatusCode::CANCELLED, "Failed to delete file.");
-        }
-
-        reply->set_deleted(true);
-
-        std::lock_guard<std::mutex> guard(lock_m);
-        file_locks.erase(request->filename());
-        
-        CountChange();
-        return Status::OK;
-    }
-    
-    Status List(ServerContext* ctx,
-                const ListRequest* request,
-                ListReply* reply) override{
-        FillServerFileList(reply);
-        return Status::OK;
-    }
-
-    Status Stat(ServerContext* ctx,
-                const FileRequest* request,
-                FileStatus* response) override{
-        std::string fullPath = WrapPath(request->filename());
-
-        struct stat st;
-        if (stat(fullPath.c_str(), &st) != 0){
-            return Status(StatusCode::NOT_FOUND, "File not found.");
-        }
-
-        response->set_filename(request->filename());
-        response->set_size(static_cast<uint64_t>(st.st_size));
-        response->set_mtime(static_cast<int64_t>(st.st_mtime));
-        
-        return Status::OK;
-    }
-    
+  
 };
 
 //

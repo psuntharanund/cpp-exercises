@@ -40,6 +40,10 @@ using dfs_service::FileStatus;
 using dfs_service::StoreRequest;
 using dfs_service::StoreReply;
 using dfs_service::DeleteReply;
+using dfs_service::LockRequest;
+using dfs_service::LockReply;
+using dfs_service::CallbackRequest;
+using dfs_service::CallbackReply;
 
 extern dfs_log_level_e DFS_LOG_LEVEL;
 
@@ -50,8 +54,8 @@ extern dfs_log_level_e DFS_LOG_LEVEL;
 // message types you are using to indicate
 // a file request and a listing of files from the server.
 //
-using FileRequestType = FileRequest;
-using FileListResponseType = ListReply;
+using FileRequestType = CallbackRequest;
+using FileListResponseType = CallbackReply;
 
 DFSClientNodeP2::DFSClientNodeP2() : DFSClientNode() {}
 DFSClientNodeP2::~DFSClientNodeP2() {}
@@ -79,9 +83,9 @@ grpc::StatusCode DFSClientNodeP2::RequestWriteAccess(const std::string &filename
     ClientContext ctx;
     ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(this->deadline_timeout));
 
-    FileRequest request;
+    LockRequest request;
     request.set_filename(filename);
-    request.set_client_id(this->ClientID);
+    request.set_clientid(this->ClientId());
 
     LockReply reply;
 
@@ -539,7 +543,7 @@ void DFSClientNodeP2::HandleCallbackList() {
                         continue;
                     }
 
-                    const LocalFileInfo& local_info = local_it->seconds;
+                    const LocalFileInfo& local_info = local_it->second;
 
                     //if file already exists locally, do nothing
                     if (local_info.crc == server_meta.crc()){
@@ -561,7 +565,7 @@ void DFSClientNodeP2::HandleCallbackList() {
 
                 //reconcile files present locally but not on server
                 for (const auto& [filename, server_meta] : local_map){
-                    if (server_map.find(filename == server_map.end()){
+                    if (server_map.find(filename) == server_map.end()){
                         dfs_log(LL_DEBUG3) << "File does not exist on server, storing. . ." << filename;
                         this->Store(filename);
                     }
@@ -612,7 +616,7 @@ void DFSClientNodeP2::InitCallbackList() {
 std::map<std::string, DFSClientNodeP2::LocalFileInfo> DFSClientNodeP2::BuildLocalMap(){
     std::map<std::string, LocalFileInfo> local_map;
 
-    DIR* directory = opendir(this->WrapPath().c_str());
+    DIR* directory = opendir(this->MountPath().c_str());
     if (!directory){
         return local_map;
     }
