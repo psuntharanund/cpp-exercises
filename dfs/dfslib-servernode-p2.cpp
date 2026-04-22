@@ -132,34 +132,6 @@ public:
         this->runner.Run();
     }
     
-    void FillServerFileList(ListReply* reply){
-        DIR* directory = opendir(this->WrapPath.c_str());
-        if (!directory){
-            return;
-        }
-
-        struct dirent* entry;
-        while ((entry = readdir(directory)) != nullptr ){
-            std::string name = entry->d_name;
-            if (name == "." || name == ".."){
-                continue;
-            }
-
-            std::string fullPath = WrapPath(name);
-            struct stat st;
-
-            if (stat(fullPath.c_str(), &st) == 0 && S_ISREG(st.st_mode)){
-                FileMetaData* file = reply->add_files();
-                file->set_filename(name);
-                file->set_size(static_cast<uint64_t>(st.st_size));
-                file->set_mtime(static_cast<int64_t>(st.st_mtime));
-                file->set_crc(dfs_file_checksum(fullPath, &this->crc_table));
-            }
-        }
-
-        closedir(directory);
-    }
-
     /**
      * Request callback for asynchronous requests
      *
@@ -222,7 +194,7 @@ public:
                 });
         lock.unlock();
 
-        if (ctx->IsCancelled()){
+        if (context->IsCancelled()){
             return;
         }
 
@@ -270,6 +242,32 @@ public:
         }
     }
 
+    void FillServerFileList(ListReply* reply){
+        DIR* directory = opendir(this->mount_path.c_str());
+        if (!directory){
+            return;
+        }
+
+        struct dirent* entry;
+        while ((entry = readdir(directory)) != nullptr ){
+            std::string name = entry->d_name;
+            if (name == "." || name == ".."){
+                continue;
+            }
+
+            std::string fullPath = WrapPath(name);
+            struct stat st;
+
+            if (stat(fullPath.c_str(), &st) == 0 && S_ISREG(st.st_mode)){
+                FileMetaData* file = reply->add_files();
+                file->set_filename(name);
+                file->set_size(static_cast<uint64_t>(st.st_size));
+                file->set_mtime(static_cast<int64_t>(st.st_mtime));
+                file->set_crc(dfs_file_checksum(fullPath, &this->crc_table));
+            }
+        }
+
+        closed
     void CountChange(){
         std::lock_guard<std::mutex> guard(change_m);
         ++change_ctr;
@@ -290,10 +288,7 @@ public:
     //
     
     //Add the mutexes
-
-    std::mutex lock_m;
-    std::map<std::string,std::string> file_locks; //this will be filename -> clientID
-    
+ 
     Status RequestWriteAccess(ServerContext* ctx, 
                             const FileRequest* request, 
                             LockReply* reply) override{
@@ -320,16 +315,17 @@ public:
         std::ofstream ofs;
         std::string filename;
         std::string fullPath;
+        std::string clientID;
         bool opened = false;
 
         while (reader->Read(&request)){
             if (request.has_meta()){
                 filename = request.meta().filename();
+                clientID = request.meta().clientID();
                 fullPath = WrapPath(filename);
                 
-                opened = HasWriteLock(filename, fullPath);
-                if (!opened){
-                    return StatusCode::RESOURCE_EXHAUSTED;
+                if(!HasWriteLock(filename, clientID)){
+                    return Statis(StatusCode::RESOURCE_EXHAUSTED, "Does not have write lock.");
                 }
 
                 ofs.open(fullPath, std::ios::binary | std::ios::trunc);
@@ -419,9 +415,9 @@ public:
         reply->set_deleted(true);
 
         std::lock_guard<std::mutex> guard(lock_m);
-        file_locks.erase(request->filename);
+        file_locks.erase(request->filename());
         
-        CountChange()
+        CountChange();
         return Status::OK;
     }
     

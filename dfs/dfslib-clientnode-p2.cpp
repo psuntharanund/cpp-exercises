@@ -81,11 +81,11 @@ grpc::StatusCode DFSClientNodeP2::RequestWriteAccess(const std::string &filename
 
     FileRequest request;
     request.set_filename(filename);
-    request.set_clientID(this->clientID);
+    request.set_client_id(this->ClientID);
 
     LockReply reply;
 
-    Status status = this->service_stub->RequestWriteAccess(&ctx, request, &reply);
+    Status status = this->service_stub->RequestWriteLock(&ctx, request, &reply);
 
     if (status.ok()){
         return StatusCode::OK;

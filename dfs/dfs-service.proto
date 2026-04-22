@@ -47,12 +47,13 @@ service DFSService {
     string filename = 1;
     uint64 size = 2;
     int64 mtime = 3;
+    uint32 crc = 4;
   }
 
   message StoreRequest{
     oneof payload{
       FileMetaData meta = 1;
-    b   bytes data = 2;
+      bytes data = 2;
     }
   }
 
