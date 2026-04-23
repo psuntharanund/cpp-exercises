@@ -86,7 +86,8 @@ service DFSService {
   }
 
   message CallbackRequest{
-    string clientID = 1;
+    string name = 1;
+    string clientID = 2;
   }
 
   message CallbackReply{

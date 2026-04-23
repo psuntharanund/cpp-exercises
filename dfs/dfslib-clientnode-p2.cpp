@@ -17,6 +17,7 @@
 #include <sys/inotify.h>
 #include <grpcpp/grpcpp.h>
 #include <utime.h>
+#include <dirent.h>
 
 #include "src/dfs-utils.h"
 #include "src/dfslibx-clientnode-p2.h"
@@ -92,7 +93,7 @@ grpc::StatusCode DFSClientNodeP2::RequestWriteAccess(const std::string &filename
     Status status = this->service_stub->RequestWriteLock(&ctx, request, &reply);
 
     if (status.ok()){
-        return StatusCode::OK;
+        return reply.accepted() ? StatusCode::OK : StatusCode::RESOURCE_EXHAUSTED;
     }
 
     if (status.error_code() == StatusCode::RESOURCE_EXHAUSTED){
@@ -193,6 +194,10 @@ grpc::StatusCode DFSClientNodeP2::Store(const std::string &filename) {
 
     if (status.ok()){
         return StatusCode::OK;
+    }
+    
+    if (status.error_code() == StatusCode::ALREADY_EXISTS){
+        return StatusCode::ALREADY_EXISTS;
     }
 
     if (status.error_code() == StatusCode::DEADLINE_EXCEEDED){
@@ -521,11 +526,9 @@ void DFSClientNodeP2::HandleCallbackList() {
                 // Do nothing?
                 //
                 
-                const FileListResponseType& server_reply = call_data->reply;
-
                 //build server map
-                std::map<std::string, FileMetaData> server_map;
-                for (const auto& file : server_reply.files()){
+                std::map<std::string, FileStatus> server_map;
+                for (const auto& file : call_data->reply.files()){
                     server_map[file.filename()] = file;
                 }
 
