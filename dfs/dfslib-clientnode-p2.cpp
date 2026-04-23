@@ -164,6 +164,7 @@ grpc::StatusCode DFSClientNodeP2::Store(const std::string &filename) {
     meta->set_filename(filename);
     meta->set_size(static_cast<uint64_t>(st.st_size));
     meta->set_mtime(static_cast<int64_t>(st.st_mtime));
+    meta->set_crc(dfs_file_checksum(fullPath, &this->crc_table));
 
     if (!writer->Write(meta_request)){
         ifs.close();

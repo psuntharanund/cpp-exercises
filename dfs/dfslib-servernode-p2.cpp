@@ -359,15 +359,15 @@ public:
                 filename = request.meta().filename();
                 fullPath = WrapPath(filename);
                 
-                //detect if file already exists
+                //detect if file already exists and is unchanged
                 struct stat already_exist;
                 if (stat(fullPath.c_str(), &already_exist) == 0){
-                    std::uint3_t server_crc = dfs_file_checksum(fullPath, &this->crc_table);
+                    std::uint32_t server_crc = dfs_file_checksum(fullPath, &this->crc_table);
 
-                    if (static_cast<uint64_t>(already_exist.st_size) == request.meta().size &&
-                        static_cast<int64_t>(already_exist.st_mtime) == request.meta().mtime &&
-                        server_crc = request.meta().crc()){
-                        return Status(StatusCode::ALREADY_EXISTS, "File already exists.");
+                    if (static_cast<uint64_t>(already_exist.st_size) == request.meta().size() &&
+                        static_cast<int64_t>(already_exist.st_mtime) == request.meta().mtime() &&
+                        server_crc == request.meta().crc()){
+                        return Status(StatusCode::ALREADY_EXISTS, "File already exists and is unchanged.");
                     }
                 }
 
