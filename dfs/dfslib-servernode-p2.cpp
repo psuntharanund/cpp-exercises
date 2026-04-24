@@ -266,14 +266,10 @@ public:
         }
 
         std::unique_lock<std::mutex> lock(change_m);
-        change_cv.wait(lock, [&] {
-                return context->IsCancelled() || change_ctr != processing;
-                });
+        change_cv.wait_for(lock, std::chrono::milliseconds(10000), [&]{
+                return change_ctr != processing;
+        });
         lock.unlock();
-
-        if (context->IsCancelled()){
-            return;
-        }
 
         FillServerFileList(response);
 
@@ -303,9 +299,13 @@ public:
 
 
                 for(QueueRequest<FileRequestType, FileListResponseType>& queue_request : this->queued_tags) {
-                    this->RequestCallbackList(queue_request.context, queue_request.request,
-                        queue_request.response, queue_request.cq, queue_request.cq, queue_request.tag);
-                    queue_request.finished = true;
+                    this->RequestCallbackList(queue_request.context, 
+                                            queue_request.request,
+                                            queue_request.response, 
+                                            queue_request.cq, 
+                                            queue_request.cq, 
+                                            queue_request.tag);
+                   queue_request.finished = true;
                 }
 
                 // any finished tags first
@@ -313,9 +313,10 @@ public:
                     this->queued_tags.begin(),
                     this->queued_tags.end(),
                     [](QueueRequest<FileRequestType, FileListResponseType>& queue_request) { return queue_request.finished; }
-                ), this->queued_tags.end());
-
+                ), 
+                this->queued_tags.end());
             }
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
         }
     }
 
@@ -358,14 +359,18 @@ public:
             if (request.has_meta()){
                 filename = request.meta().filename();
                 fullPath = WrapPath(filename);
+                std::string clientID = request.clientid();
                 
+                if (!HasWriteLock(filename, clientID)){
+                    return Status(StatusCode::RESOURCE_EXHAUSTED, "Lock is on.");
+                }
+
                 //detect if file already exists and is unchanged
                 struct stat already_exist;
                 if (stat(fullPath.c_str(), &already_exist) == 0){
                     std::uint32_t server_crc = dfs_file_checksum(fullPath, &this->crc_table);
 
                     if (static_cast<uint64_t>(already_exist.st_size) == request.meta().size() &&
-                        static_cast<int64_t>(already_exist.st_mtime) == request.meta().mtime() &&
                         server_crc == request.meta().crc()){
                         return Status(StatusCode::ALREADY_EXISTS, "File already exists and is unchanged.");
                     }
@@ -403,9 +408,11 @@ public:
         metaData->set_mtime(static_cast<int64_t>(st.st_mtime));
         metaData->set_crc(dfs_file_checksum(fullPath, &this->crc_table));
 
-        std::lock_guard<std::mutex> guard(lock_m);
-        file_locks.erase(filename);
-        
+        {
+            std::lock_guard<std::mutex> guard(lock_m);
+            file_locks.erase(filename);
+        }
+
         CountChange();
         return Status::OK;
     }
@@ -446,7 +453,8 @@ public:
                 const FileRequest* request,
                 DeleteReply* reply) override{
         std::string fullPath = WrapPath(request->filename());
-
+        
+        
         struct stat st;
         if (stat(fullPath.c_str(), &st) != 0){
             return Status(StatusCode::NOT_FOUND, "File not found.");
@@ -457,10 +465,12 @@ public:
         }
 
         reply->set_deleted(true);
-
-        std::lock_guard<std::mutex> guard(lock_m);
-        file_locks.erase(request->filename());
         
+        {
+            std::lock_guard<std::mutex> guard(lock_m);
+            file_locks.erase(request->filename());
+        }
+
         CountChange();
         return Status::OK;
     }

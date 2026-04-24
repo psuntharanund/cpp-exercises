@@ -165,11 +165,15 @@ grpc::StatusCode DFSClientNodeP2::Store(const std::string &filename) {
     meta->set_size(static_cast<uint64_t>(st.st_size));
     meta->set_mtime(static_cast<int64_t>(st.st_mtime));
     meta->set_crc(dfs_file_checksum(fullPath, &this->crc_table));
+    meta_request.set_clientid(this->ClientId());
 
     if (!writer->Write(meta_request)){
         ifs.close();
         writer->WritesDone();
         Status status = writer->Finish();
+        if (status.error_code() == StatusCode::ALREADY_EXISTS){
+            return StatusCode::ALREADY_EXISTS;
+        }
         return status.error_code();
     }
 
@@ -184,6 +188,9 @@ grpc::StatusCode DFSClientNodeP2::Store(const std::string &filename) {
                 ifs.close();
                 writer->WritesDone();
                 Status status = writer->Finish();
+                if (status.error_code() == StatusCode::ALREADY_EXISTS){
+                    return StatusCode::ALREADY_EXISTS;
+                }
                 return status.error_code();
             }
         }
@@ -244,8 +251,36 @@ grpc::StatusCode DFSClientNodeP2::Fetch(const std::string &filename) {
     request.set_filename(filename);
 
     std::string fullPath = this->WrapPath(filename);
+    
+    //check status of the server
+    FileStatus server_status;
+    auto rc = this->Stat(filename, &server_status);
+
+    if (rc == StatusCode::NOT_FOUND){
+        return StatusCode::NOT_FOUND;
+    }
+
+    if (rc == StatusCode::DEADLINE_EXCEEDED){
+        return StatusCode::DEADLINE_EXCEEDED;
+    }
+
+    if (rc != StatusCode::OK){
+        return StatusCode::CANCELLED;
+    }
+
+    //check if the local copy matches server
+    struct stat local_st;
+    if (stat(fullPath.c_str(), &local_st) == 0){
+        std::uint32_t local_crc = dfs_file_checksum(fullPath, &this->crc_table);
+        if (local_crc == server_status.crc()){
+            return StatusCode::ALREADY_EXISTS;
+        }
+    }
+
+    BeginSuppression();
     std::ofstream ofs(fullPath, std::ios::binary | std::ios::trunc);
     if (!ofs.is_open()){
+        EndSuppression();
         return StatusCode::CANCELLED;
     }
 
@@ -257,6 +292,7 @@ grpc::StatusCode DFSClientNodeP2::Fetch(const std::string &filename) {
         if (!ofs.good()){
             ofs.close();
             Status status = reader->Finish();
+            EndSuppression();
             return StatusCode::CANCELLED;
         }
     }
@@ -265,17 +301,27 @@ grpc::StatusCode DFSClientNodeP2::Fetch(const std::string &filename) {
     Status status = reader->Finish();
 
     if (status.ok()){
+        if (this->Stat(filename, &server_status) == StatusCode::OK){
+            struct utimbuf times;
+            times.actime = server_status.mtime();
+            times.modtime = server_status.mtime();
+            utime(fullPath.c_str(), &times);
+        }
+        EndSuppression();
         return StatusCode::OK;
     }
 
     if (status.error_code() == StatusCode::NOT_FOUND){
+        EndSuppression();
         return StatusCode::NOT_FOUND;
     }
 
     if (status.error_code() == StatusCode::DEADLINE_EXCEEDED){
+        EndSuppression();
         return StatusCode::DEADLINE_EXCEEDED;
     }
-
+    
+    EndSuppression();
     return StatusCode::CANCELLED;
     
 }
@@ -454,6 +500,11 @@ void DFSClientNodeP2::InotifyWatcherCallback(std::function<void()> callback) {
     //
 
     std::lock_guard<std::mutex> guard(this->sync_m);
+
+    if (this->suppress_inotify){
+        return;
+    }
+
     callback();
 
 }
@@ -570,8 +621,10 @@ void DFSClientNodeP2::HandleCallbackList() {
                 //reconcile files present locally but not on server
                 for (const auto& [filename, server_meta] : local_map){
                     if (server_map.find(filename) == server_map.end()){
-                        dfs_log(LL_DEBUG3) << "File does not exist on server, storing. . ." << filename;
-                        this->Store(filename);
+                        BeginSuppression();
+                        std::string fullPath = this->WrapPath(filename);
+                        this->Delete(filename);
+                        EndSuppression();
                     }
                 }
 
@@ -597,6 +650,14 @@ void DFSClientNodeP2::HandleCallbackList() {
         InitCallbackList();
 
     }
+}
+
+void DFSClientNodeP2::BeginSuppression(){
+    this->suppress_inotify = true;
+}
+
+void DFSClientNodeP2::EndSuppression(){
+    this->suppress_inotify = false;
 }
 
 /**

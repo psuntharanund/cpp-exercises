@@ -17,7 +17,10 @@ class DFSClientNodeP2 : public DFSClientNode {
 
     private:
         std::mutex sync_m;
-        
+        bool suppress_inotify = false;
+        void BeginSuppression();
+        void EndSuppression();
+
         struct LocalFileInfo{
             std::string filename;
             std::uint32_t crc;
@@ -133,7 +136,7 @@ public:
      void InitCallbackList() override;
 
     /**
-     * Watcher wrapper
+     * Watcher wra®per
      *
      * This method will get called whenever inotify signals
      * a change to a file. The callback parameter is a method
